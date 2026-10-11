@@ -1,0 +1,8 @@
+__pycache__/
+.idea/
+*.pyc
+traffic.db
+*.mp4
+venv/
+.venv/
+docs/

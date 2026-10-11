@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>进程流量监控助手</title>
+<!-- ECharts：建议下载 echarts.min.js 放到 static 文件夹（离线演示需要） -->
+<script src="/static/echarts.min.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei",sans-serif; background:#f0f2f5; }
+  .header { background:#1f2d3d; color:#fff; padding:16px 24px; font-size:20px; }
+  .tabs { display:flex; gap:8px; padding:12px 24px; background:#fff;
+          border-bottom:1px solid #e4e7ed; }
+  .tab { padding:8px 20px; cursor:pointer; border-radius:4px; font-size:14px; }
+  .tab.active { background:#409eff; color:#fff; }
+  .content { padding:20px 24px; }
+  .card { background:#fff; border-radius:8px; padding:16px;
+          margin-bottom:16px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  .chart { width:100%; height:420px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { padding:8px 12px; border-bottom:1px solid #ebeef5; text-align:left; }
+  th { background:#f5f7fa; }
+  input,select,button { padding:8px 12px; border:1px solid #dcdfe6;
+                        border-radius:4px; font-size:14px; }
+  button { background:#409eff; color:#fff; border:none; cursor:pointer; }
+  button.danger { background:#f56c6c; }
+  .alert-item { padding:10px; border-left:4px solid #e6a23c;
+                background:#fdf6ec; margin-bottom:8px; border-radius:4px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="header">🖥️ 进程流量监控助手</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('realtime',this)">实时监控</div>
+  <div class="tab" onclick="switchTab('history',this)">历史查询</div>
+  <div class="tab" onclick="switchTab('rules',this)">规则管理</div>
+  <div class="tab" onclick="switchTab('alerts',this)">告警记录</div>
+</div>
+
+<div class="content">
+  <!-- 实时监控 -->
+  <div id="tab-realtime">
+    <div class="card"><div id="rt-chart" class="chart"></div></div>
+  </div>
+
+  <!-- 历史查询 -->
+  <div id="tab-history" class="hidden">
+    <div class="card">
+      选择日期:
+      <select id="date-select"></select>
+      <button onclick="loadHistory()">查询</button>
+      <button onclick="exportCsv()" style="background:#67c23a">导出CSV</button>
+    </div>
+    <div class="card"><div id="his-chart" class="chart"></div></div>
+        <div class="card"><div id="hour-chart" class="chart"></div></div>
+    <div class="card" id="his-table-wrap"></div>
+  </div>
+
+  <!-- 规则管理 -->
+  <div id="tab-rules" class="hidden">
+    <div class="card">
+      <input id="rule-name" placeholder="进程名 (如 chrome.exe)" style="width:220px">
+      <input id="rule-quota" placeholder="配额 (MB)" type="number" style="width:120px">
+      <select id="rule-action">
+        <option value="alert">超配额仅告警</option>
+        <option value="block">超配额断网</option>
+      </select>
+      <button onclick="addRule()">添加规则</button>
+    </div>
+    <div class="card" id="rules-table-wrap"></div>
+  </div>
+
+  <!-- 告警记录 -->
+  <div id="tab-alerts" class="hidden">
+    <div class="card" id="alerts-wrap"><p>暂无告警</p></div>
+  </div>
+</div>
+
+<script>
+let rtChart, hisChart, hourChart;
+
+
+// ---- Tab切换 ----
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  ['realtime','history','rules','alerts'].forEach(t =>
+    document.getElementById('tab-' + t).classList.add('hidden'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  if (name === 'history') loadDates();
+  if (name === 'rules') loadRules();
+  if (name === 'alerts') loadAlerts();
+}
+
+// ---- 实时监控：柱状图，每3秒刷新 ----
+rtChart = echarts.init(document.getElementById('rt-chart'));
+async function loadRealtime() {
+  const data = await fetch('/api/realtime').then(r => r.json());
+  // 按进程聚合并排序，取前10
+  const agg = {};
+  data.forEach(d => {
+    if (!agg[d.name]) agg[d.name] = {in:0, out:0};
+    agg[d.name].in += d.in_bytes;
+    agg[d.name].out += d.out_bytes;
+  });
+  const top = Object.entries(agg)
+    .map(([name,v]) => ({name, total: v.in + v.out, ...v}))
+    .sort((a,b) => b.total - a.total).slice(0,10);
+  rtChart.setOption({
+    title: {text: '进程实时流量 (最近窗口)'},
+    tooltip: {trigger: 'axis'},
+    xAxis: {type: 'category', data: top.map(t => t.name)},
+    yAxis: {type: 'value', name: '字节'},
+    series: [
+      {name: '下行', type: 'bar', stack: 't', data: top.map(t => t.in),
+       itemStyle: {color: '#67c23a'}},
+      {name: '上行', type: 'bar', stack: 't', data: top.map(t => t.out),
+       itemStyle: {color: '#409eff'}}
+    ],
+    grid: {bottom: 80},
+    xAxis_rotate: 30
+  });
+}
+loadRealtime();
+setInterval(loadRealtime, 3000);
+
+// ---- 历史查询：日期列表 + 饼图 ----
+async function loadDates() {
+  const dates = await fetch('/api/dates').then(r => r.json());
+  const sel = document.getElementById('date-select');
+  sel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+  if (dates.length) loadHistory();
+}
+
+async function loadHistory() {
+  const date = document.getElementById('date-select').value;
+  if (!date) return;
+  const data = await fetch('/api/history?date=' + date).then(r => r.json());
+  if (!hisChart) hisChart = echarts.init(document.getElementById('his-chart'));
+  hisChart.setOption({
+    title: {text: date + ' 各进程流量分布'},
+    tooltip: {trigger: 'item', formatter: '{b}: {c} B ({d}%)'},
+    series: [{type: 'pie', radius: ['30%','65%'],
+      data: data.slice(0,12).map(d =>
+        ({name: d.proc_name, value: d.in_bytes + d.out_bytes}))}]
+  });
+  // 明细表格
+  document.getElementById('his-table-wrap').innerHTML =
+    '<table><tr><th>进程</th><th>下行(B)</th><th>上行(B)</th><th>总计(B)</th></tr>' +
+    data.map(d => `<tr><td>${d.proc_name}</td><td>${d.in_bytes}</td>` +
+      `<td>${d.out_bytes}</td><td>${d.in_bytes + d.out_bytes}</td></tr>`)
+      .join('') + '</table>';
+    loadHourly(date);
+}
+// ---- 导出CSV ----
+function exportCsv() {
+  const date = document.getElementById('date-select').value;
+  if (!date) { alert('请先选择日期'); return; }
+  window.location.href = '/api/export?date=' + date;
+}
+// ---- 24小时趋势折线图 ----
+async function loadHourly(date) {
+  const data = await fetch('/api/hourly?date=' + date).then(r => r.json());
+  if (!hourChart) hourChart = echarts.init(document.getElementById('hour-chart'));
+  hourChart.setOption({
+    title: {text: date + ' 24小时流量趋势'},
+    tooltip: {trigger: 'axis'},
+    legend: {data: ['下行', '上行']},
+    xAxis: {type: 'category', data: data.map(d => d.hour + '时')},
+    yAxis: {type: 'value', name: '字节'},
+    series: [
+      {name: '下行', type: 'line', smooth: true, data: data.map(d => d.in_bytes),
+       itemStyle: {color: '#67c23a'}},
+      {name: '上行', type: 'line', smooth: true, data: data.map(d => d.out_bytes),
+       itemStyle: {color: '#409eff'}}
+    ]
+  });
+}
+
+// ---- 规则管理 ----
+async function loadRules() {
+  const rules = await fetch('/api/rules').then(r => r.json());
+  document.getElementById('rules-table-wrap').innerHTML =
+    '<table><tr><th>进程</th><th>配额(MB)</th><th>动作</th><th>操作</th></tr>' +
+    rules.map(r => `<tr><td>${r.proc_name}</td><td>${r.quota_mb}</td>` +
+      `<td>${r.action === 'block' ? '断网' : '告警'}</td>` +
+      `<td><button class="danger" onclick="delRule('${r.proc_name}')">删除</button>` +
+      ` <button onclick="unblockProc('${r.proc_name}')">解除断网</button></td></tr>`)
+      .join('') + '</table>';
+}
+
+async function addRule() {
+  const proc_name = document.getElementById('rule-name').value.trim();
+  const quota_mb = Number(document.getElementById('rule-quota').value);
+  const action = document.getElementById('rule-action').value;
+  if (!proc_name || !quota_mb) { alert('请填写进程名和配额'); return; }
+  await fetch('/api/rules', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({proc_name, quota_mb, action})
+  });
+  document.getElementById('rule-name').value = '';
+  document.getElementById('rule-quota').value = '';
+  loadRules();
+}
+
+async function delRule(name) {
+  await fetch('/api/rules/delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({proc_name: name})
+  });
+  loadRules();
+}
+
+async function unblockProc(name) {
+  await fetch('/api/unblock', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({proc_name: name})
+  });
+  loadRules();
+}
+
+// ---- 告警记录 ----
+async function loadAlerts() {
+  const alerts = await fetch('/api/alerts').then(r => r.json());
+  document.getElementById('alerts-wrap').innerHTML =
+    alerts.length ? alerts.slice().reverse().map(a =>
+      `<div class="alert-item"><b>${a.ts}</b> ${a.message}</div>`).join('')
+    : '<p>暂无告警</p>';
+}
+</script>
+</body>
+</html>
